@@ -2,72 +2,83 @@
 import sys
 import socket
 import re
+from multiprocessing import Queue
 
-# read in username and password
-USERNAME = sys.argv[1]
-PASSWORD = sys.argv[2]
-HOSTNAME = 'fring.ccs.neu.edu'
+BUFFER_SIZE = 4096
 
-# connect to host on http port
-sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-sock.connect((HOSTNAME, 80))
+class Webcrawler:
+    queued_urls = Queue(maxsize=0)
+    crawled_urls = []
+    session_id = None
+    csrf_token = None
+    # read in username and password
+    username = sys.argv[1]
+    password = sys.argv[2]
+    # initialize hostname
+    hostname = 'fring.ccs.neu.edu'
 
-# get request to get csrf and session tokens
-GET_LOGIN_COOKIES = "GET /accounts/login/?next=/fakebook/ HTTP/1.1 \r\n" \
-                    "Host: {0}\r\n\r\n".format(HOSTNAME)
+    # function to send a request through and return data
+    def send_request(self, request):
+        # connect to host on http port
+        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        sock.connect((self.hostname, 80))
+        sock.send(request)
+        data = ''
+        while True:
+            try:
+                recv_data = sock.recv(BUFFER_SIZE)
+                if recv_data:
+                    data += recv_data
+                else:
+                    break
+            except socket.error:
+                break
+        sock.close()
+        return data
 
-# send request for login cookies
-sock.send(GET_LOGIN_COOKIES)
+    # function to get csrf token and then post login form
+    def login_account(self):
+        # get request to get csrf tokens
+        GET_LOGIN_COOKIES = "GET /accounts/login/?next=/fakebook/ HTTP/1.1 \r\n" \
+                            "Host: {0}\r\n\r\n".format(self.hostname)
+        # send initial get request
+        msg = self.send_request(GET_LOGIN_COOKIES)
+        # use regular expression to parse out csrf token
+        self.csrf_token = re.search(r'csrftoken=(.*?);', msg).group(1)
 
-msg = sock.recv(4096)
+        # data to be passed into our post request
+        login_data = "csrfmiddlewaretoken={0};username={1};password={2}".format(self.csrf_token, self.username, self.password)
+        # login to fakebook account
+        LOGIN = "POST /accounts/login/?next=/fakebook/ HTTP/1.1 \n" \
+                "Host: fring.ccs.neu.edu\n" \
+                "Cookie: csrftoken={0}\n" \
+                "Content-Type: application/x-www-form-urlencoded\n" \
+                "Content-Length: {1}\n" \
+                "Origin: fring.ccs.neu.edu\n" \
+                "Content-Language: en-us\n" \
+                "Referer: /accounts/login/?next=/fakebook/\n\n" \
+                "{2};\r\n".format(self.csrf_token, str(len(login_data)), login_data)
 
-sock.close()
+        # send post to log in
+        msg = self.send_request(LOGIN)
+        self.session_id = re.search(r'sessionid=(.*?);', msg).group(1)
+        print self.session_id
+        # parse out location from 302 from login
+        if '302 FOUND' in msg:
+            location = re.search(r'Location: (.*?)\n', msg).group(1)
 
+        # send get request for location specified in 302 response
+        GET_MAIN_PAGE = "GET {0} HTTP/1.1 \r\n" \
+                        "Host: {1}\r\n" \
+                        "Cookie: sessionid={2}\r\n\r\n".format(location, self.hostname, self.session_id)
+        msg = self.send_request(GET_MAIN_PAGE)
 
-# use regular expressions to parse out csrf and session tokens
-cookies = re.findall(r'Set-Cookie: (.*?);', msg)
-csrf_cookie = cookies[0]
-session_cookie = cookies[1]
-csrf_token = re.search(r'csrftoken=(.*?);', msg).group(1)
-#session_cookie = re.findall(r'Set-Cookie: (.*?);', msg)[1]
+        # add all urls in response to our queue
+        for url in re.findall(r'href="(.*?)">', msg):
+            if '/fakebook/' in url and url != '/fakebook/':
+                print url
+                self.queued_urls.put(url)
 
-print session_cookie
-
-sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-sock.connect((HOSTNAME, 80))
-
-login_data = "csrfmiddlewaretoken={0};username={1};password={2}".format(csrf_token, USERNAME, PASSWORD)
-
-# login to fakebook account
-LOGIN = "POST /accounts/login/?next=/fakebook/ HTTP/1.1 \n" \
-        "Host: fring.ccs.neu.edu\n" \
-        "Cookie: {0}; {1}\n" \
-        "Content-Type: application/x-www-form-urlencoded\n" \
-        "Content-Length: {2}\n" \
-        "Origin: fring.ccs.neu.edu\n" \
-        "Content-Language: en-us\n" \
-        "Referer: /accounts/login/?next=/fakebook/\n\n" \
-        "csrfmiddlewaretoken={5};username={3};password={4};\r\n".format(csrf_cookie, session_cookie, str(len(login_data)), USERNAME, PASSWORD, csrf_token)
-sock.send(LOGIN)
-
-msg = sock.recv(4096)
-
-print msg
-
-cookies = re.findall(r'Set-Cookie: (.*?);', msg)
-session_cookie = cookies[0]
-
-sock.close()
-
-sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-sock.connect((HOSTNAME, 80))
-
-GET_MAIN_PAGE = "GET http://fring.ccs.neu.edu/fakebook/ HTTP/1.1 \r\n" \
-                "Host: {0}\r\n" \
-                "Cookie: {1}\r\n\r\n".format(HOSTNAME, session_cookie)
-
-sock.send(GET_MAIN_PAGE)
-
-msg = sock.recv(4096)
-
-print msg
+if __name__ == '__main__':
+    webcrawler = Webcrawler()
+    webcrawler.login_account()
