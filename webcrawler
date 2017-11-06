@@ -19,9 +19,10 @@ GET_LOGIN_COOKIES = "GET /accounts/login/?next=/fakebook/ HTTP/1.1 \r\n" \
 # send request for login cookies
 sock.send(GET_LOGIN_COOKIES)
 
-msg = sock.recv(1024000)
+msg = sock.recv(4096)
 
 sock.close()
+
 
 # use regular expressions to parse out csrf and session tokens
 cookies = re.findall(r'Set-Cookie: (.*?);', msg)
@@ -30,38 +31,43 @@ session_cookie = cookies[1]
 csrf_token = re.search(r'csrftoken=(.*?);', msg).group(1)
 #session_cookie = re.findall(r'Set-Cookie: (.*?);', msg)[1]
 
-print csrf_cookie
-print csrf_token
-
+print session_cookie
 
 sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
 sock.connect((HOSTNAME, 80))
 
-login_data = "username={0}&password={1}".format(USERNAME, PASSWORD)
+login_data = "csrfmiddlewaretoken={0};username={1};password={2}".format(csrf_token, USERNAME, PASSWORD)
 
 # login to fakebook account
 LOGIN = "POST /accounts/login/?next=/fakebook/ HTTP/1.1 \n" \
         "Host: fring.ccs.neu.edu\n" \
-        "Cookie: {0}\n" \
-        "Cookie: {1}\n" \
+        "Cookie: {0}; {1}\n" \
         "Content-Type: application/x-www-form-urlencoded\n" \
         "Content-Length: {2}\n" \
-        "User-Agent: Perry\n" \
         "Origin: fring.ccs.neu.edu\n" \
+        "Content-Language: en-us\n" \
         "Referer: /accounts/login/?next=/fakebook/\n\n" \
-        "csrfmiddlewaretoken={5};username={3};password={4};next=%2Ffakebook%2F\r\n".format(csrf_cookie, session_cookie, str(len(login_data)), USERNAME, PASSWORD, csrf_token)
+        "csrfmiddlewaretoken={5};username={3};password={4};\r\n".format(csrf_cookie, session_cookie, str(len(login_data)), USERNAME, PASSWORD, csrf_token)
 sock.send(LOGIN)
 
-msg = sock.recv(1024000)
-sock.close()
-
-while '500 INTERNAL SERVER ERROR' in msg:
-    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    sock.connect((HOSTNAME, 80))
-    sock.send(LOGIN)
-    msg = sock.recv(1024000)
-    sock.close()
+msg = sock.recv(4096)
 
 print msg
 
+cookies = re.findall(r'Set-Cookie: (.*?);', msg)
+session_cookie = cookies[0]
+
 sock.close()
+
+sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+sock.connect((HOSTNAME, 80))
+
+GET_MAIN_PAGE = "GET http://fring.ccs.neu.edu/fakebook/ HTTP/1.1 \r\n" \
+                "Host: {0}\r\n" \
+                "Cookie: {1}\r\n\r\n".format(HOSTNAME, session_cookie)
+
+sock.send(GET_MAIN_PAGE)
+
+msg = sock.recv(4096)
+
+print msg
