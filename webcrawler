@@ -2,7 +2,8 @@
 import sys
 import socket
 import re
-from multiprocessing import Queue
+from multiprocessing import Queue, Process
+import xml.etree.ElementTree as ET
 
 BUFFER_SIZE = 4096
 
@@ -11,6 +12,8 @@ class Webcrawler:
     crawled_urls = []
     session_id = None
     csrf_token = None
+    cookie = ''
+    processes = []
     # read in username and password
     username = sys.argv[1]
     password = sys.argv[2]
@@ -47,37 +50,75 @@ class Webcrawler:
         self.csrf_token = re.search(r'csrftoken=(.*?);', msg).group(1)
 
         # data to be passed into our post request
-        login_data = "csrfmiddlewaretoken={0};username={1};password={2}".format(self.csrf_token, self.username, self.password)
+        login_data = "csrfmiddlewaretoken={0};username={1};password={2}".format(
+            self.csrf_token, self.username, self.password)
         # login to fakebook account
-        LOGIN = "POST /accounts/login/?next=/fakebook/ HTTP/1.1 \n" \
-                "Host: fring.ccs.neu.edu\n" \
-                "Cookie: csrftoken={0}\n" \
+        login_headers = "Cookie: csrftoken={0}\n" \
                 "Content-Type: application/x-www-form-urlencoded\n" \
                 "Content-Length: {1}\n" \
                 "Origin: fring.ccs.neu.edu\n" \
                 "Content-Language: en-us\n" \
-                "Referer: /accounts/login/?next=/fakebook/\n\n" \
-                "{2};\r\n".format(self.csrf_token, str(len(login_data)), login_data)
-
+                "Referer: /accounts/login/?next=/fakebook/".format(self.csrf_token, str(len(login_data)))
+        login_req = generate_http_req("/accounts/login/?next=/fakebook/", "fring.ccs.neu.edu",
+                                        method='POST', additional_headers=login_headers, body=login_data)
         # send post to log in
-        msg = self.send_request(LOGIN)
+        msg = self.send_request(login_req)
         self.session_id = re.search(r'sessionid=(.*?);', msg).group(1)
-        print self.session_id
         # parse out location from 302 from login
         if '302 FOUND' in msg:
             location = re.search(r'Location: (.*?)\n', msg).group(1)
-
+        self.cookie = "Cookie: sessionid={}\r\n\r\n".format(self.session_id)
         # send get request for location specified in 302 response
-        GET_MAIN_PAGE = "GET {0} HTTP/1.1 \r\n" \
-                        "Host: {1}\r\n" \
-                        "Cookie: sessionid={2}\r\n\r\n".format(location, self.hostname, self.session_id)
-        msg = self.send_request(GET_MAIN_PAGE)
+        main_page = generate_http_req(location, self.hostname, additional_headers=self.cookie)
+        msg = self.send_request(main_page)
 
-        # add all urls in response to our queue
-        for url in re.findall(r'href="(.*?)">', msg):
+        self.queue_urls_from_string(msg)
+        self.run_processes()
+
+    def run_processes(self):
+        while not self.queued_urls.empty():
+            p = Process(target=self.crawl_page)
+            p.start()
+            self.processes.append(p)
+
+        for p in self.processes:
+            p.join()
+            self.processes.remove(p)
+
+    def crawl_page(self):
+        url = self.queued_urls.get()
+        self.crawled_urls.append(url)
+        # print(url)
+        req = generate_http_req(url, self.hostname, additional_headers=self.cookie)
+        msg = self.send_request(req)
+        # print(msg)
+        if ("HTTP/1.1 200 OK" not in msg): return
+        self.queue_urls_from_string(msg)
+        # if len(msg.split('\r\n\r\n')) < 2:
+        # print(msg)
+        el = None
+        try:
+            el = ET.fromstring(msg.split('\r\n\r\n')[1])
+        except Exception:
+            return
+        print([flag for flag in el.findall('.//h2[@class="secret_flag"]')])
+
+    def queue_urls_from_string(self, html):
+        for url in re.findall(r'href="(.*?)">', html):
             if '/fakebook/' in url and url != '/fakebook/':
-                print url
-                self.queued_urls.put(url)
+                # print url
+                if url not in self.crawled_urls: self.queued_urls.put(url)
+
+def generate_http_req(url, hostname, body = None,
+                          additional_headers='', method='GET', version='1.1'):
+    request = "{0} {1} HTTP/{2}\n" \
+               "Host: {3}".format(method, url, version, hostname)
+    if additional_headers:
+        request = "{0}\n{1}".format(request, additional_headers)
+    if body:
+        request = "{0}\n\n{1}".format(request, body)
+    request = "{0}r\n".format(request)
+    return request
 
 if __name__ == '__main__':
     webcrawler = Webcrawler()
